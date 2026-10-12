@@ -6,9 +6,26 @@ let currentSection = 1;
 const totalSections = 14;
 let anexoCounter = 0;
 
+/* ============================================================
+   PESOS POR SECCIÓN — ajustados por GRAVEDAD real
+   Críticas: Fugas (4), Motor (7), Transmisión (8)
+   Importantes: Eléctrico (5), Inspección (6), Tren (10), Ruta (13)
+   Secundarias: Documentación (2), Valores (3), Llantas (9),
+                Interior (11), Accesorios (12)
+   ============================================================ */
 const sectionWeights = {
-    2: 5, 3: 5, 4: 18, 5: 8, 6: 8, 7: 18,
-    8: 15, 9: 5, 10: 8, 11: 5, 12: 2, 13: 3
+    2: 5,    // Documentación
+    3: 4,    // Valores comerciales
+    4: 22,   // Fugas de fluidos (CRÍTICA)
+    5: 7,    // Sistema eléctrico
+    6: 7,    // Inspección visual
+    7: 22,   // Motor (CRÍTICA)
+    8: 18,   // Transmisión / Caja (CRÍTICA)
+    9: 4,    // Llantas
+    10: 9,   // Tren delantero y suspensión
+    11: 4,   // Interior
+    12: 1,   // Accesorios (cosmético)
+    13: 4    // Prueba de ruta
 };
 
 const sectionQuestions = {
@@ -162,6 +179,9 @@ function parseMoney(str) {
 
 // ============ AUTOGUARDADO ============
 function autoSaveDraft() {
+    // Si estamos reseteando, NO guardar nada
+    if (window._isResetting) return;
+
     const draft = {};
     document.querySelectorAll('input, select, textarea').forEach(el => {
         if (el.id && el.type !== 'file') draft[el.id] = el.value;
@@ -186,23 +206,45 @@ function loadDraft() {
     const raw = localStorage.getItem('peritaje_draft');
     if (!raw) return;
     try {
-        const { data, section } = JSON.parse(raw);
+        const { data, section, timestamp } = JSON.parse(raw);
         if (!data) return;
+
+        // Si el borrador tiene más de 24 horas, ignorarlo
+        if (timestamp && (Date.now() - timestamp) > 24 * 60 * 60 * 1000) {
+            localStorage.removeItem('peritaje_draft');
+            return;
+        }
+
+        // Verificar que al menos un campo tenga valor (si no, es un borrador vacío)
+        const tieneDatos = Object.values(data).some(v => v && String(v).trim() !== '');
+        if (!tieneDatos) {
+            localStorage.removeItem('peritaje_draft');
+            return;
+        }
+
         Object.entries(data).forEach(([id, val]) => {
             const el = document.getElementById(id);
-            if (el) el.value = val;
+            if (el && val !== undefined && val !== null) {
+                el.value = val;
+            }
         });
+
         if (section > 1 && section <= totalSections) {
             document.querySelectorAll('.form-section').forEach(s => s.classList.remove('active'));
-            document.getElementById(`section-${section}`)?.classList.add('active');
+            const secEl = document.getElementById(`section-${section}`);
+            if (secEl) secEl.classList.add('active');
             currentSection = section;
             updateProgress(section);
         }
-    } catch(e) { console.warn('Draft corrupto', e); }
+    } catch(e) {
+        console.warn('Draft corrupto', e);
+        localStorage.removeItem('peritaje_draft');
+    }
 }
 
 let saveTimer;
 document.addEventListener('input', () => {
+    if (window._isResetting) return;
     clearTimeout(saveTimer);
     saveTimer = setTimeout(autoSaveDraft, 2500);
 });
@@ -210,8 +252,10 @@ document.addEventListener('input', () => {
 // ============ NAVEGACIÓN ============
 function updateProgress(section) {
     const percent = (section / totalSections) * 100;
-    document.getElementById('progressBar').style.width = `${percent}%`;
-    document.getElementById('progressLabel').textContent = `Paso ${section} de ${totalSections}`;
+    const bar = document.getElementById('progressBar');
+    const label = document.getElementById('progressLabel');
+    if (bar) bar.style.width = `${percent}%`;
+    if (label) label.textContent = `Paso ${section} de ${totalSections}`;
 }
 
 function nextSection(sectionNumber) {
@@ -393,19 +437,36 @@ function calculateScores() {
     return scores;
 }
 
+/* ============================================================
+   PUNTAJE GLOBAL — con pesos por gravedad, penalizaciones
+   severas y VETO automático en secciones críticas muy bajas.
+   ============================================================ */
 function calculateGlobalScore(sectionScores) {
     let totalWeighted = 0, totalWeight = 0, criticalPenalty = 0;
+    let criticalBelow40 = false;
 
     const chassisEl = document.getElementById('chassis');
     const chassisBad = chassisEl && chassisEl.value === 'Malo';
 
+    const criticalSections = [4, 7, 8];
+
     for (const section in sectionScores) {
         if (!sectionWeights[section]) continue;
         let s = sectionScores[section];
+        const secNum = parseInt(section);
 
-        if ([4, 7, 8].includes(parseInt(section))) {
-            if (s < 50) { s = Math.max(0, s - 30); criticalPenalty += 15; }
-            else if (s < 70) { s = Math.max(0, s - 15); criticalPenalty += 10; }
+        if (criticalSections.includes(secNum)) {
+            if (s < 40) {
+                s = Math.max(0, s - 45);
+                criticalPenalty += 25;
+                criticalBelow40 = true;
+            } else if (s < 60) {
+                s = Math.max(0, s - 25);
+                criticalPenalty += 15;
+            } else if (s < 70) {
+                s = Math.max(0, s - 15);
+                criticalPenalty += 8;
+            }
         }
 
         totalWeighted += s * sectionWeights[section];
@@ -413,7 +474,10 @@ function calculateGlobalScore(sectionScores) {
     }
 
     const base = totalWeight > 0 ? Math.round(totalWeighted / totalWeight) : 0;
-    if (chassisBad) return 65;
+
+    if (criticalBelow40) return Math.min(base, 60);
+    if (chassisBad) return Math.min(base, 65);
+
     return Math.max(0, base - criticalPenalty);
 }
 
@@ -664,7 +728,6 @@ function buildSectionBlock(sectionId, title, icon, layoutClass, isCritical = fal
     const criticalTag = isCritical ? '<span style="color: var(--bad); font-size: 11px; margin-left: 8px;">(SECCIÓN CRÍTICA)</span>' : '';
     const scoreColor = score < 70 && isCritical ? 'var(--bad)' : 'var(--f1-accent)';
 
-    // Alerta si es crítica y está por debajo de 70
     const criticalAlert = (isCritical && score < 70)
         ? `<div class="critical-section-alert">
                <i class="fas fa-exclamation-triangle"></i>
@@ -673,7 +736,6 @@ function buildSectionBlock(sectionId, title, icon, layoutClass, isCritical = fal
            </div>`
         : '';
 
-    // Leyenda especial SOLO para la sección de fugas (4)
     const legendHTML = (parseInt(sectionId) === 4)
         ? `<div class="legend-bar">
                <span class="legend-item"><span class="color-dot good"></span> Bueno/No</span>
@@ -1134,57 +1196,88 @@ function saveAsPDF(event) {
 
 function printReport() { window.print(); }
 
+/* ============================================================
+   NUEVA EVALUACIÓN — limpieza TOTAL y retorno a Sección 1
+   ============================================================ */
 function newEvaluation() {
     if (!confirm('¿Iniciar nueva evaluación? Se perderán los datos actuales.')) return;
 
-    // Resetear el formulario
-    const form = document.getElementById('evaluationForm');
-    form.reset();
+    // 1) Bloquear autoguardado ANTES de cualquier cosa
+    window._isResetting = true;
 
-    // Borrar explícitamente TODOS los campos (inputs, selects, textareas)
+    // 2) Cancelar cualquier autoguardado pendiente
+    if (typeof saveTimer !== 'undefined' && saveTimer) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+    }
+
+    // 3) Borrar localStorage PRIMERO
+    localStorage.removeItem('peritaje_draft');
+
+    const form = document.getElementById('evaluationForm');
+
+    // 4) Reset nativo del form
+    try { form.reset(); } catch (e) {}
+
+    // 5) Limpiar CADA campo manualmente
     form.querySelectorAll('input, select, textarea').forEach(el => {
         if (el.type === 'file') {
-            el.value = '';
+            try { el.value = ''; } catch (e) {}
         } else if (el.tagName === 'SELECT') {
             el.selectedIndex = 0;
+            el.value = '';
+        } else if (el.type === 'checkbox' || el.type === 'radio') {
+            el.checked = false;
         } else {
             el.value = '';
         }
-        // Quitar bordes rojos de validación
         el.style.borderColor = '#e0e0e0';
     });
 
-    // Ocultar todos los mensajes de error
-    form.querySelectorAll('.validation-error').forEach(e => e.style.display = 'none');
+    // 6) Ocultar mensajes de error
+    form.querySelectorAll('.validation-error').forEach(e => {
+        e.style.display = 'none';
+    });
 
-    // Ocultar previsualizaciones de fotos principales
+    // 7) Limpiar previsualizaciones de fotos
     document.querySelectorAll('.photo-preview').forEach(p => {
         p.style.display = 'none';
+        p.removeAttribute('src');
         p.src = '';
     });
 
-    // Limpiar anexos
+    // 8) Limpiar anexos
     const cont = document.getElementById('anexosContainer');
     if (cont) cont.innerHTML = '';
     anexoCounter = 0;
 
-    // Mostrar formulario, ocultar informe
-    document.getElementById('evaluationForm').style.display = 'block';
+    // 9) Mostrar formulario, ocultar informe
     document.getElementById('finalReport').style.display = 'none';
     document.getElementById('finalReport').innerHTML = '';
+    form.style.display = 'block';
 
-    // Volver a la sección 1
-    currentSection = 1;
+    // 10) Ir a Sección 1
     document.querySelectorAll('.form-section').forEach(s => s.classList.remove('active'));
-    document.getElementById('section-1').classList.add('active');
+    const sec1 = document.getElementById('section-1');
+    if (sec1) sec1.classList.add('active');
+    currentSection = 1;
     updateProgress(1);
 
+    // 11) Resetear variables globales
     window._currentScores = null;
 
-    // Limpiar borrador guardado
+    // 12) Borrar localStorage OTRA VEZ por seguridad
     localStorage.removeItem('peritaje_draft');
 
+    // 13) Scroll al tope
     window.scrollTo({ top: 0, behavior: 'smooth' });
+
+    // 14) Desbloquear autoguardado después de 800ms
+    setTimeout(() => {
+        window._isResetting = false;
+        // Asegurar que no quede nada guardado
+        localStorage.removeItem('peritaje_draft');
+    }, 800);
 }
 
 // ============ INICIALIZACIÓN ============
